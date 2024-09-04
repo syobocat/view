@@ -6,12 +6,11 @@ import os
 
 struct App {
 mut:
-	context  &gg.Context = unsafe { nil }
-	filelist []string
-	index    int
-	prev     int = -1
-	current  int = -1
-	next     int = -1
+	context     &gg.Context = unsafe { nil }
+	filelist    []string
+	index       int = -1
+	last_loaded int = -1
+	ids         []int
 }
 
 fn main() {
@@ -27,7 +26,7 @@ fn main() {
 		bg_color: gx.black
 		width:    600
 		height:   400
-		init_fn:  init
+		init_fn:  load_next
 		frame_fn: draw
 		// resized_fn: redraw
 		keydown_fn: key
@@ -38,84 +37,54 @@ fn main() {
 	app.context.run()
 }
 
-fn init(mut app App) {
-	app.prev = -1
-	app.current = if app.filelist.len == 0 {
-		-1
-	} else {
-		if image := app.context.create_image(app.filelist[0]) {
-			app.context.cache_image(image)
-		} else {
-			-1
-		}
-	}
-	app.next = if app.filelist.len < 2 {
-		-1
-	} else {
-		if image := app.context.create_image(app.filelist[1]) {
-			app.context.cache_image(image)
-		} else {
-			-1
-		}
-	}
-}
-
 fn load_next(mut app App) {
-	if app.next == -1 {
+	if app.last_loaded == app.filelist.len - 1 && app.index == app.ids.len - 1 {
 		return
+	}
+
+	if image := app.context.create_image(app.filelist[app.last_loaded + 1]) {
+		app.last_loaded += 1
+		app.ids << app.context.cache_image(image)
+	} else {
+		app.last_loaded += 1
+		load_next(mut app)
 	}
 	app.index += 1
-	if app.prev != -1 {
-		app.context.remove_cached_image_by_idx(app.prev)
-	}
-	app.prev = app.current
-	app.current = app.next
-	app.next = if app.filelist.len <= app.index + 1 {
-		-1
+}
+
+fn go_next(mut app App) {
+	if app.index == app.ids.len - 1 {
+		load_next(mut app)
 	} else {
-		if image := app.context.create_image(app.filelist[app.index + 1]) {
-			app.context.cache_image(image)
-		} else {
-			-1
-		}
+		app.index += 1
 	}
 }
 
-fn load_prev(mut app App) {
-	if app.prev == -1 {
-		return
-	}
-	app.index -= 1
-	if app.next != -1 {
-		app.context.remove_cached_image_by_idx(app.next)
-	}
-	app.next = app.current
-	app.current = app.prev
-	app.prev = if app.index < 1 {
-		-1
-	} else {
-		if image := app.context.create_image(app.filelist[app.index - 1]) {
-			app.context.cache_image(image)
-		} else {
-			-1
-		}
+fn go_prev(mut app App) {
+	if app.index > 0 {
+		app.index -= 1
 	}
 }
 
 fn key(c gg.KeyCode, m gg.Modifier, mut app App) {
 	match c {
-		.right { load_next(mut app) }
-		.left { load_prev(mut app) }
+		.right { go_next(mut app) }
+		.left { go_prev(mut app) }
 		else {}
 	}
+
+	println('=====')
+	println('${app.ids}')
+	println('      index: ${app.index}')
+	println('last_loaded: ${app.last_loaded}')
 }
 
 fn draw(mut app App) {
-	if app.current == -1 {
+	if app.ids.len == 0 {
 		return
 	}
 
-	image := app.context.get_cached_image_by_idx(app.current)
+	image := app.context.get_cached_image_by_idx(app.ids[app.index])
 
 	window_size := app.context.window_size()
 
