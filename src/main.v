@@ -6,27 +6,31 @@ import os
 
 struct App {
 mut:
-	context     &gg.Context = unsafe { nil }
-	filelist    []string
-	index       int = -1
-	last_loaded int = -1
-	ids         []int
+	context  &gg.Context = unsafe { nil }
+	filelist []string
+	index    int = -1
+	ids      []int
 }
 
 fn main() {
-	mut app := &App{}
-
 	mut args := os.args.clone()
 	args.drop(1)
-	app.filelist = parse_args(args)
+	filelist, first_index := parse_args(args)
+	mut app := &App{
+		filelist: filelist
+		index:    first_index - 1
+		ids:      []int{len: filelist.len, init: -1}
+	}
 
-	println(app.filelist)
+	$if !prod {
+		println(app.filelist)
+	}
 
 	app.context = gg.new_context(
 		bg_color: gx.black
 		width:    600
 		height:   400
-		init_fn:  load_next
+		init_fn:  init
 		frame_fn: draw
 		// resized_fn: redraw
 		keydown_fn: key
@@ -37,46 +41,67 @@ fn main() {
 	app.context.run()
 }
 
-fn load_next(mut app App) {
-	if app.last_loaded == app.filelist.len - 1 && app.index == app.ids.len - 1 {
-		return
-	}
-
-	if image := app.context.create_image(app.filelist[app.last_loaded + 1]) {
-		app.last_loaded += 1
-		app.ids << app.context.cache_image(image)
-	} else {
-		app.last_loaded += 1
-		load_next(mut app)
-	}
-	app.index += 1
-}
-
-fn go_next(mut app App) {
-	if app.index == app.ids.len - 1 {
-		load_next(mut app)
-	} else {
-		app.index += 1
+fn init(mut app App) {
+	if app.filelist.len > 0 {
+		advance(mut app, 1)
 	}
 }
 
-fn go_prev(mut app App) {
-	if app.index > 0 {
-		app.index -= 1
+// 読み込まれていない画像を読みとる
+// 成功でtrue、失敗でfalseを返す
+fn load(mut app App) !bool {
+	if app.ids[app.index] != -1 {
+		return error('Image already loaded')
 	}
+	if image := app.context.create_image(app.filelist[app.index]) {
+		app.ids[app.index] = app.context.cache_image(image)
+		return true
+	} else {
+		return false
+	}
+}
+
+// count枚進める
+// 画像が読み込まれていない場合は読み込む
+// 読み込めなければ一つ通り越す
+fn advance(mut app App, count int) {
+	is_last := app.index + count >= app.ids.len
+	is_first := app.index + count < 0
+
+	if is_last {
+		app.index = app.ids.len - 1
+	} else if is_first {
+		app.index = 0
+	} else {
+		app.index += count
+	}
+	if app.ids[app.index] == -1 {
+		if result := load(mut app) {
+			if !result {
+				if is_last {
+					advance(mut app, -1)
+				} else {
+					advance(mut app, count)
+				}
+			}
+		}
+	}
+
+	gg.set_window_title(app.filelist[app.index])
 }
 
 fn key(c gg.KeyCode, m gg.Modifier, mut app App) {
 	match c {
-		.right { go_next(mut app) }
-		.left { go_prev(mut app) }
+		.right { advance(mut app, 1) }
+		.left { advance(mut app, -1) }
 		else {}
 	}
 
-	println('=====')
-	println('${app.ids}')
-	println('      index: ${app.index}')
-	println('last_loaded: ${app.last_loaded}')
+	$if !prod {
+		println('=====')
+		println('${app.ids}')
+		println('index: ${app.index}')
+	}
 }
 
 fn draw(mut app App) {
@@ -96,10 +121,6 @@ fn draw(mut app App) {
 		image_ratio > window_ratio { window_size.width, int(image.height * (f64(window_size.width) / image.width)) }
 		else { int(image.width * (f64(window_size.height) / image.height)), window_size.height }
 	}
-
-	// println('window: ${window_size.width}x${window_size.height}')
-	// println(' image: ${image.width}x${image.height}')
-	// println('  draw: ${w}x${h}')
 
 	x, y := match true {
 		image_ratio == window_ratio { 0, 0 }
