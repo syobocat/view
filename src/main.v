@@ -8,14 +8,21 @@ import os
 
 const cache_size = 3
 
+struct Cache {
+mut:
+	last_id i64
+	images  map[i64]gg.Image
+}
+
 struct App {
 mut:
 	context    &gg.Context = unsafe { nil }
 	filelist   []string
 	index      int = -1
-	current    int
-	prev_cache DoublyLinkedList[thread int]
-	next_cache DoublyLinkedList[thread int]
+	current    i64
+	cache      shared Cache
+	prev_cache shared DoublyLinkedList[thread i64]
+	next_cache shared DoublyLinkedList[thread i64]
 }
 
 fn main() {
@@ -32,10 +39,8 @@ fn main() {
 	args.drop(1)
 	filelist, first_index := parse_args(args)
 	mut app := &App{
-		filelist:   filelist
-		index:      first_index - 1
-		prev_cache: DoublyLinkedList[thread int]{}
-		next_cache: DoublyLinkedList[thread int]{}
+		filelist: filelist
+		index:    first_index - 1
 	}
 
 	app.context = gg.new_context(
@@ -72,28 +77,36 @@ fn init(mut app App) {
 			break
 		}
 	}
-	for i := 1; i <= cache_size; i += 1 {
-		app.prev_cache.push_front(spawn load(mut app, app.index - i))
-		app.next_cache.push_back(spawn load(mut app, app.index + i))
+	lock app.prev_cache, app.next_cache {
+		for i := 1; i <= cache_size; i += 1 {
+			app.prev_cache.push_front(spawn load(mut app, app.index - i))
+			app.next_cache.push_back(spawn load(mut app, app.index + i))
+		}
 	}
 	log.info('Index: ${app.index}, ID: ${app.current}')
 }
 
 // 読み込まれていない画像を読みとる
-fn load(mut app App, index int) int {
+fn load(mut app App, index int) i64 {
 	path := app.filelist[index] or { return -1 }
 	if image := app.context.create_image(path) {
-		idx := app.context.cache_image(image)
-		log.info('Image ${path} loaded at ${idx}')
-		return idx
+		lock app.cache {
+			app.cache.last_id += 1
+			idx := app.cache.last_id
+			app.cache.images[idx] = image
+			log.info('Image ${path} loaded at ${idx}')
+			return idx
+		}
 	} else {
 		return -1
 	}
 }
 
-fn unload(mut app App, idx int) {
+fn unload(mut app App, idx i64) {
 	if idx >= 0 {
-		app.context.remove_cached_image_by_idx(idx)
+		lock app.cache {
+			unsafe { app.cache.images.delete(idx) }
+		}
 		log.info('Image ${idx} unloaded')
 	}
 }
@@ -121,37 +134,72 @@ fn move(mut app App, direction Direction) {
 
 	// 新規画像を別スレッドで読み込み
 	match direction {
-		.forward { app.next_cache.push_back(spawn load(mut app, app.index + cache_size)) }
-		.backward { app.prev_cache.push_front(spawn load(mut app, app.index - cache_size)) }
+		.forward {
+			lock app.next_cache {
+				app.next_cache.push_back(spawn load(mut app, app.index + cache_size))
+			}
+		}
+		.backward {
+			lock app.prev_cache {
+				app.prev_cache.push_front(spawn load(mut app, app.index - cache_size))
+			}
+		}
 	}
 
 	// 古いのをキャッシュから削除
-	to_unload := match direction {
-		.forward { app.prev_cache.pop_front() or { panic('Application is in invalid state') } }
-		.backward { app.next_cache.pop_back() or { panic('Application is in invalid state') } }
-	}.wait()
-	spawn unload(mut app, to_unload)
+	match direction {
+		.forward {
+			to_unload := lock app.prev_cache {
+				app.prev_cache.pop_front() or { panic('Application is in invalid state') }.wait()
+			}
+			spawn unload(mut app, to_unload)
+		}
+		.backward {
+			to_unload := lock app.next_cache {
+				app.next_cache.pop_back() or { panic('Application is in invalid state') }.wait()
+			}
+			spawn unload(mut app, to_unload)
+		}
+	}
 
 	// 今のをキャッシュへ
 	current := app.current
-	f := fn [current] () int {
+	f := fn [current] () i64 {
 		return current
 	}
 	match direction {
-		.forward { app.prev_cache.push_back(spawn f()) }
-		.backward { app.next_cache.push_front(spawn f()) }
+		.forward {
+			lock app.prev_cache {
+				app.prev_cache.push_back(spawn f())
+			}
+		}
+		.backward {
+			lock app.next_cache {
+				app.next_cache.push_front(spawn f())
+			}
+		}
 	}
 
 	// 新しいのを読み込み
-	to_draw := match direction {
-		.forward { app.next_cache.pop_front() or { return } }
-		.backward { app.prev_cache.pop_back() or { return } }
+	match direction {
+		.forward {
+			to_draw := lock app.next_cache {
+				app.next_cache.pop_front() or { return }.wait()
+			}
+			app.current = to_draw
+		}
+		.backward {
+			to_draw := lock app.prev_cache {
+				app.prev_cache.pop_back() or { return }.wait()
+			}
+			app.current = to_draw
+		}
 	}
-	app.current = to_draw.wait()
 	if app.current < 0 {
 		move(mut app, direction)
 		return
 	}
+	log.info('Index: ${app.index}, ID: ${app.current}')
 }
 
 fn key(c gg.KeyCode, m gg.Modifier, mut app App) {
@@ -160,15 +208,15 @@ fn key(c gg.KeyCode, m gg.Modifier, mut app App) {
 		.left { prev(mut app) }
 		else {}
 	}
-
-	log.info('Index: ${app.index}, ID: ${app.current}')
 }
 
 fn draw(mut app App) {
 	if app.filelist.len == 0 || app.current < 0 {
 		return
 	}
-	image := app.context.get_cached_image_by_idx(app.current)
+	image := rlock app.cache {
+		app.cache.images[app.current] or { return }
+	}
 
 	window_size := app.context.window_size()
 
