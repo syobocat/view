@@ -5,6 +5,7 @@ import gg
 import gx
 import log
 import os
+import stbi
 
 const cache_size = 3
 
@@ -63,6 +64,7 @@ fn init(mut app App) {
 	if app.filelist.len == 0 {
 		return
 	}
+	app.context.cache_image(gg.Image{})
 	for i := 0; app.index - i >= 0 || app.index + i < app.filelist.len; i += 1 {
 		res_plus := load(mut app, app.index + i)
 		if res_plus >= 0 {
@@ -77,6 +79,7 @@ fn init(mut app App) {
 			break
 		}
 	}
+	update_gg_cache(mut app)
 	lock app.prev_cache, app.next_cache {
 		for i := 1; i <= cache_size; i += 1 {
 			app.prev_cache.push_front(spawn load(mut app, app.index - i))
@@ -86,14 +89,31 @@ fn init(mut app App) {
 	log.info('Index: ${app.index}, ID: ${app.current}')
 }
 
+fn update_gg_cache(mut app App) {
+	app.context.remove_cached_image_by_idx(0)
+	rlock app.cache {
+		app.context.cache_image(app.cache.images[app.current] or { panic('Unexpected Error') })
+	}
+}
+
 // 読み込まれていない画像を読みとる
 fn load(mut app App, index int) i64 {
 	path := app.filelist[index] or { return -1 }
-	if image := app.context.create_image(path) {
+	if stb_img := stbi.load(path) {
 		lock app.cache {
 			app.cache.last_id += 1
 			idx := app.cache.last_id
-			app.cache.images[idx] = image
+			mut img := gg.Image{
+				width:       stb_img.width
+				height:      stb_img.height
+				nr_channels: stb_img.nr_channels
+				ok:          stb_img.ok
+				data:        stb_img.data
+				ext:         stb_img.ext
+				path:        path
+			}
+			img.init_sokol_image()
+			app.cache.images[idx] = img
 			log.info('Image ${path} loaded at ${idx}')
 			return idx
 		}
@@ -199,6 +219,7 @@ fn move(mut app App, direction Direction) {
 		move(mut app, direction)
 		return
 	}
+	update_gg_cache(mut app)
 	log.info('Index: ${app.index}, ID: ${app.current}')
 }
 
@@ -211,9 +232,6 @@ fn key(c gg.KeyCode, m gg.Modifier, mut app App) {
 }
 
 fn draw(mut app App) {
-	if app.filelist.len == 0 || app.current < 0 {
-		return
-	}
 	image := rlock app.cache {
 		app.cache.images[app.current] or { return }
 	}
@@ -236,6 +254,6 @@ fn draw(mut app App) {
 	}
 
 	app.context.begin()
-	app.context.draw_image(x, y, w, h, image)
+	app.context.draw_image_by_id(x, y, w, h, 0)
 	app.context.end()
 }
